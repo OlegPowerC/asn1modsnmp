@@ -1059,11 +1059,11 @@ func UnmarshalWithParams(b []byte, val interface{}, params string) (rest []byte,
 
 // FindSNMPv3AuthParamsOffset находит точную позицию authParams в SNMPv3 пакете
 // согласно RFC 3414 (User-based Security Model)
-// Возвращает offset начала 12-байтного digest (после тега и длины)
-// Возвращает 0 при ошибке (невалидный offset всегда > 0 в корректном пакете)
-func FindSNMPv3AuthParamsOffset(rawPacket []byte) (offset int, err error) {
+// Возвращает offset начала authParams и его длину (после тега и длины OCTET STRING)
+// Возвращает offset=0 при ошибке
+func FindSNMPv3AuthParamsOffset(rawPacket []byte) (offset int, authParamLen int, err error) {
 	if len(rawPacket) < 10 {
-		return 0, errors.New("packet too short")
+		return 0, 0, errors.New("packet too short")
 	}
 
 	pos := 0
@@ -1071,96 +1071,92 @@ func FindSNMPv3AuthParamsOffset(rawPacket []byte) (offset int, err error) {
 	// 1. Outer SEQUENCE (SNMPv3 Message)
 	t, newPos, err := parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse outer SEQUENCE: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse outer SEQUENCE: %v", err)
 	}
 	if t.class != ClassUniversal || t.tag != TagSequence {
-		return 0, errors.New("expected SEQUENCE at start")
+		return 0, 0, errors.New("expected SEQUENCE at start")
 	}
 	pos = newPos
 
 	// 2. version INTEGER - пропускаем
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse version: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse version: %v", err)
 	}
 	pos = newPos + t.length
 
 	// 3. msgGlobalData SEQUENCE - пропускаем
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse msgGlobalData: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse msgGlobalData: %v", err)
 	}
 	pos = newPos + t.length
 
 	// 4. msgSecurityParameters OCTET STRING
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse msgSecurityParameters: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse msgSecurityParameters: %v", err)
 	}
 	if t.class != ClassUniversal || t.tag != TagOctetString {
-		return 0, fmt.Errorf("expected OCTET STRING for msgSecurityParameters, got tag %d", t.tag)
+		return 0, 0, fmt.Errorf("expected OCTET STRING for msgSecurityParameters, got tag %d", t.tag)
 	}
 	pos = newPos
 
 	// Внутри OCTET STRING - USM SEQUENCE (RFC 3414)
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse USM SEQUENCE: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse USM SEQUENCE: %v", err)
 	}
 	if t.class != ClassUniversal || t.tag != TagSequence {
-		return 0, errors.New("expected USM SEQUENCE inside msgSecurityParameters")
+		return 0, 0, errors.New("expected USM SEQUENCE inside msgSecurityParameters")
 	}
 	pos = newPos
 
-	// 5. Поля USM SEQUENCE (RFC 3414):
+	// 5. Поля USM SEQUENCE (RFC 3414 Section 2.4):
 	//    a) msgAuthoritativeEngineID (OCTET STRING)
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse engineID: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse engineID: %v", err)
 	}
 	pos = newPos + t.length
 
 	//    b) msgAuthoritativeEngineBoots (INTEGER)
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse boots: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse boots: %v", err)
 	}
 	pos = newPos + t.length
 
 	//    c) msgAuthoritativeEngineTime (INTEGER)
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse time: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse time: %v", err)
 	}
 	pos = newPos + t.length
 
 	//    d) msgUserName (OCTET STRING)
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse username: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse username: %v", err)
 	}
 	pos = newPos + t.length
 
 	//    e) msgAuthenticationParameters (OCTET STRING) - искомое поле!
 	t, newPos, err = parseTagAndLength(rawPacket, pos)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse authParams: %v", err)
+		return 0, 0, fmt.Errorf("failed to parse authParams: %v", err)
 	}
 
 	if t.class != ClassUniversal || t.tag != TagOctetString {
-		return 0, fmt.Errorf("expected OCTET STRING for authParams, got tag %d", t.tag)
+		return 0, 0, fmt.Errorf("expected OCTET STRING for authParams, got tag %d", t.tag)
 	}
 
-	// RFC 3414: authParams всегда 12 байт (или 0 для noAuthNoPriv)
-	if t.length != 12 {
-		return 0, fmt.Errorf("authParams should be 12 bytes (RFC 3414), got %d", t.length)
-	}
-
-	// Проверка границ: убедимся что 12 байт данных действительно есть
-	if newPos+12 > len(rawPacket) {
-		return 0, errors.New("authParams data extends beyond packet bounds")
+	// Проверка границ: убедимся что данные не выходят за пределы пакета
+	if newPos+t.length > len(rawPacket) {
+		return 0, 0, errors.New("authParams data extends beyond packet bounds")
 	}
 
 	// newPos указывает на начало данных authParams (после тега и длины)
-	return newPos, nil
+	// t.length - фактическая длина authParams из пакета
+	return newPos, t.length, nil
 }
