@@ -1160,3 +1160,20 @@ func FindSNMPv3AuthParamsOffset(rawPacket []byte) (offset int, authParamLen int,
 	// t.length - фактическая длина authParams из пакета
 	return newPos, t.length, nil
 }
+
+// Возвращает данные без TAG и LEN
+func ExtractDataWOTagAndLen(rawData []byte) (PureData []byte, err error) {
+	if len(rawData) < 3 {
+		return nil, errors.New("data array too short")
+	}
+
+	pos := 0
+
+	// 1. Outer SEQUENCE
+	_, newPos, err := parseTagAndLength(rawData, pos)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse outer SEQUENCE: %v", err)
+	}
+	pos = newPos
+	return rawData[pos:], nil
+}
