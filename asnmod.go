@@ -493,7 +493,7 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 
 // Новая функция парсер тега, дины, смещения основанная на оригинальной
 func parseTagAndLengthBER(bytes []byte, initOffset int, depth uint8) (ret tagAndLength, offset int, err error) {
-	const maxDepth = 10
+	const maxDepth = 3
 	if depth > maxDepth {
 		err = SyntaxError{"maximum nesting depth exceeded"}
 		return
