@@ -487,6 +487,18 @@ type RawContent []byte
 // SET OF (tag 17) are mapped to SEQUENCE and SEQUENCE OF (tag 16) since we
 // don't distinguish between ordered and unordered objects in this code.
 func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset int, err error) {
+	//Оригинальную функцию сложно безопасно рекурсивно использовать, вводим параметр depth (Глубину обработки nfinite длины)
+	return parseTagAndLengthBER(bytes, initOffset, 0)
+}
+
+// Новая функция парсер тега, дины, смещения основанная на оригинальной
+func parseTagAndLengthBER(bytes []byte, initOffset int, depth uint8) (ret tagAndLength, offset int, err error) {
+	const maxDepth = 10
+	if depth > maxDepth {
+		err = SyntaxError{"maximum nesting depth exceeded"}
+		return
+	}
+
 	offset = initOffset
 	// parseTagAndLength should not be called without at least a single
 	// byte to read. Thus this check is for robustness:
@@ -519,20 +531,56 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 	}
 	b = bytes[offset]
 	offset++
+
 	if b&0x80 == 0 {
 		// The length is encoded in the bottom 7 bits.
+		if int(b&0x7f) == 0 {
+			ret.length = 0
+		}
 		ret.length = int(b & 0x7f)
 	} else {
+		//Мультибайтовая кодировка длинны, в DER допостимо 0x81 0xfa но не допустимо 0x81 0x05
+		//В BER допускается оба варианта
 		// Bottom 7 bits give the number of length bytes to follow.
 		numBytes := int(b & 0x7f)
 		if numBytes == 0 {
-			err = SyntaxError{"indefinite length found (not DER)"}
+			//Если количество байт длины равно нулю, то это Indefinite форма, и конец данных будет обозначен двумя байтами 0x00 0x00
+			if !ret.isCompound {
+				//Такая форма длины не допускается в примитивных типах
+				err = SyntaxError{"indefinite length found in primitive type"}
+				return
+			}
+
+			//Indefinite length - парсим все вложенные элементы
+			i := offset
+
+			for i < len(bytes)-1 {
+				//Проверяем end-of-contents (0x00,0x00)
+				if bytes[i] == 0x00 && bytes[i+1] == 0x00 {
+					ret.length = i - offset + 2
+					return
+				}
+
+				//Парсим очередной элемент
+				elem, newPos, parseErr := parseTagAndLengthBER(bytes, i, depth+1)
+				if parseErr != nil {
+					err = fmt.Errorf("indefinite length: %w", parseErr)
+					return
+				}
+				// Пропускаем элемент
+				i = newPos + elem.length
+				if i > len(bytes) {
+					err = SyntaxError{"indefinite length: bounds exceeded"}
+					return
+				}
+			}
+			err = SyntaxError{"indefinite length: end-of-contents not found"}
 			return
 		}
 		ret.length = 0
 		for i := 0; i < numBytes; i++ {
 			if offset >= len(bytes) {
-				err = SyntaxError{"truncated tag or length"}
+				err = SyntaxError{"truncated length"}
 				return
 			}
 			b = bytes[offset]
@@ -545,19 +593,16 @@ func parseTagAndLength(bytes []byte, initOffset int) (ret tagAndLength, offset i
 			}
 			ret.length <<= 8
 			ret.length |= int(b)
+			//Тут надо модифицировать
 			//if ret.length == 0 {
 			// DER requires that lengths be minimal.
 			//	err = StructuralError{"superfluous leading zeros in length"}
 			//	return
 			//}
 		}
+		//Тут надо модифицировать
 		// Short lengths must be encoded in short form.
-		//if ret.length < 0x80 {
-		//	err = StructuralError{"non-minimal length"}
-		//	return
-		//}
 	}
-
 	return
 }
 
@@ -1166,7 +1211,6 @@ func ExtractDataWOTagAndLen(rawData []byte) (PureData []byte, err error) {
 	if len(rawData) < 3 {
 		return nil, errors.New("data array too short")
 	}
-
 	pos := 0
 
 	// 1. Outer SEQUENCE
